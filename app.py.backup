@@ -1,0 +1,192 @@
+#!/usr/bin/env python3
+"""
+Streamlit web application for HIV protease inhibitor resistance prediction.
+Supports both single sequence and batch prediction.
+Fixed version that addresses torch._classes runtime error.
+"""
+
+import streamlit as st
+import pandas as pd
+import os
+import sys
+
+# Fix for torch._classes error
+import warnings
+warnings.filterwarnings("ignore", message=".*torch._classes.*")
+
+# Import necessary modules
+from utils.preprocessing import parse_input_samples
+from config.settings import MODEL_ROOT, MODEL_SEED, DRUG_NAMES
+
+# Prevent torch import at module level
+# Only import inside functions where needed
+
+# Page configuration
+st.set_page_config(
+    page_title="HIV Protease Inhibitor Resistance Prediction",
+    page_icon="🧬",
+    layout="wide"
+)
+
+# Initialize predictor inside function to avoid torch import at module level
+@st.cache_resource
+def get_predictor():
+    """Initialize and cache the predictor"""
+    import torch
+    from inference.predictor import ProteinPredictor
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    return ProteinPredictor(model_root=MODEL_ROOT, seed=MODEL_SEED, device=device)
+
+def render_header():
+    """Render the application header"""
+    st.title("HIV Protease Inhibitor Resistance Prediction")
+    st.markdown("""
+    This application predicts HIV protease inhibitor resistance based on amino acid sequences.
+    You can input a single sequence or multiple sequences in batch mode.
+    """)
+
+def single_sequence_mode():
+    """Interface for predicting a single sequence"""
+    st.header("Single Sequence Prediction")
+    
+    # Sequence input
+    sequence = st.text_area(
+        "Enter an amino acid sequence:",
+        height=100,
+        help="Input a single amino acid sequence using standard one-letter codes."
+    )
+    
+    if st.button("Predict", key="predict_single"):
+        if not sequence.strip():
+            st.warning("Please enter a valid amino acid sequence.")
+            return
+        
+        try:
+            predictor = get_predictor()
+            results = predictor.predict_sequence(sequence)
+            
+            # Create DataFrame for display
+            df = pd.DataFrame([
+                {"Drug": drug, "Prediction": data["prediction"], "Probability": f"{data['probability']:.4f}"}
+                for drug, data in results.items()
+            ])
+            
+            # Display results
+            st.subheader("Prediction Results")
+            st.dataframe(df.set_index("Drug"), use_container_width=True)
+            
+            # Create a color-coded heatmap
+            st.subheader("Resistance Heatmap")
+            col1, col2 = st.columns([1, 3])
+            with col1:
+                st.dataframe(
+                    pd.DataFrame(
+                        {"Resistant": [data["prediction"] for drug, data in results.items()]},
+                        index=results.keys()
+                    ).style.background_gradient(cmap="RdYlGn_r"),
+                    use_container_width=True
+                )
+            
+            with col2:
+                st.info("0 = Susceptible, 1 = Resistant")
+                
+        except Exception as e:
+            st.error(f"An error occurred: {str(e)}")
+            st.exception(e)
+
+def batch_prediction_mode():
+    """Interface for predicting multiple sequences in batch"""
+    st.header("Batch Prediction")
+    
+    st.markdown("""
+    Enter multiple sequences in FASTA-like format:
+    ```
+    >SAMPLE_ID
+    SEQUENCE
+    >SAMPLE_ID
+    SEQUENCE
+    ...
+    ```
+    
+    Example:
+    ```
+    >88_APV
+    PQITLWQRPIVPIRIEGQLTEALLDTGADDTVLEEINLSGRWKPKMIGGIGGFVKVRQYDQVTIEICDHKVIGTVLVGPTPANIIGRNLLTQLGCTLNF
+    >NFV_P302
+    PQITLWQRPFVTIKIGGQLKEALLDTGADDTVLEEMNLPGRWKPKIIGGVGGFIKVRQYDQILIEICGHKAIGTVLVGPTPVNIIGRNLLTQIGCTLNF
+    ```
+    """)
+    
+    # Batch input
+    batch_input = st.text_area(
+        "Enter multiple sequences (FASTA format):",
+        height=200,
+        help="Input multiple sequences in FASTA format (>ID followed by sequence)"
+    )
+    
+    if st.button("Predict Batch", key="predict_batch"):
+        if not batch_input.strip():
+            st.warning("Please enter at least one sequence.")
+            return
+        
+        try:
+            # Parse input samples
+            samples = parse_input_samples(batch_input)
+            
+            if not samples:
+                st.warning("No valid sequences found. Please check the format.")
+                return
+            
+            # Run prediction
+            predictor = get_predictor()
+            results_df = predictor.predict_batch(samples)
+            
+            # Display results in required format
+            st.subheader("Prediction Results")
+            
+            # Show formatted table
+            formatted_results = predictor.format_results(results_df, 'table')
+            st.code(formatted_results, language="markdown")
+            
+            # Show detailed results
+            st.subheader("Detailed Results Table")
+            st.dataframe(results_df, use_container_width=True)
+            
+            # Option to download results
+            csv = results_df.reset_index().rename(columns={'index': 'HIVP_Mutant'}).to_csv(index=False)
+            st.download_button(
+                label="Download Results as CSV",
+                data=csv,
+                file_name="hiv_protease_predictions.csv",
+                mime="text/csv"
+            )
+            
+        except Exception as e:
+            st.error(f"An error occurred: {str(e)}")
+            st.exception(e)
+
+def main():
+    """Main application function"""
+    try:
+        render_header()
+        
+        # Create tabs for single and batch modes
+        tab1, tab2 = st.tabs(["Single Sequence", "Batch Prediction"])
+        
+        with tab1:
+            single_sequence_mode()
+            
+        with tab2:
+            batch_prediction_mode()
+            
+        # Footer
+        st.markdown("---")
+        st.markdown(
+            "HIV Protease Inhibitor Resistance Prediction Tool | Powered by ProtBERT"
+        )
+    except Exception as e:
+        st.error(f"An application error occurred: {str(e)}")
+        st.exception(e)
+
+if __name__ == "__main__":
+    main()
